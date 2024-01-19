@@ -26,17 +26,17 @@ total_changes = additions + deletions
 # 根据更改行数设置标签
 label = ''
 if total_changes <= 9:
-    label = 'XS'
+    label = 'size/XS'
 elif 10 <= total_changes <= 29:
-    label = 'S'
+    label = 'size/S'
 elif 30 <= total_changes <= 99:
-    label = 'M'
+    label = 'size/M'
 elif 100 <= total_changes <= 499:
-    label = 'L'
+    label = 'size/L'
 elif 500 <= total_changes <= 999:
-    label = 'XL'
+    label = 'size/XL'
 else:
-    label = 'XXL'
+    label = 'size/XXL'
 
 # 设置标签
 pr.set_labels(label)
