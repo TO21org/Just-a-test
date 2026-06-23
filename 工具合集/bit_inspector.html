@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Bit Inspector</title>
+<style>
+  body { font-family: monospace; background:#1e1e1e; color:#d4d4d4; padding:24px; max-width:900px; }
+  input { background:#2d2d2d; color:#d4d4d4; border:1px solid #555; padding:4px 8px;
+          font-family:monospace; font-size:14px; }
+  button { background:#0e639c; color:#fff; border:none; padding:5px 14px;
+           cursor:pointer; font-family:monospace; font-size:13px; }
+  button:hover { opacity:.85; }
+  button.sec { background:#1a6e3e; }
+  button.neu { background:#444; }
+  /* bit grid */
+  .grid { display:flex; gap:1px; flex-wrap:nowrap; margin:12px 0; }
+  .grp  { display:flex; gap:1px; margin-right:5px; }
+  .cell { display:flex; flex-direction:column; align-items:center; width:24px;
+          cursor:pointer; user-select:none; }
+  .bv   { font-size:15px; font-weight:bold; padding:2px 3px; border-radius:3px; transition:.1s; }
+  .bv.on  { color:#4ec9b0; background:#1a3a35; }
+  .bv.off { color:#555;    background:#252525; }
+  .bv.hi  { outline:2px solid #f9c74f; }  /* highlighted range */
+  .cell:hover .bv { opacity:.7; }
+  .bn   { font-size:9px; color:#555; margin-top:1px; }
+  /* current value display */
+  .curval { font-size:22px; font-weight:bold; color:#4ec9b0; margin:8px 0; letter-spacing:1px; }
+  .subdim { font-size:12px; color:#666; margin-left:8px; }
+  /* row */
+  .row { display:flex; gap:10px; align-items:center; margin:10px 0; flex-wrap:wrap; }
+  .label { color:#888; font-size:13px; }
+  .out  { color:#9cdcfe; font-size:14px; min-width:200px; }
+  hr { border-color:#2a2a2a; margin:18px 0; }
+  .hint { color:#555; font-size:12px; margin-top:4px; }
+  .section-title { color:#569cd6; font-size:13px; font-weight:bold;
+                   text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }
+</style>
+</head>
+<body>
+
+<!-- 当前状态：bit grid + 当前值 -->
+<div class="grid" id="grid"></div>
+<div>
+  <span class="curval" id="curval">0x00000000</span>
+  <span class="subdim" id="cursub"></span>
+</div>
+<div class="row" style="margin-top:6px">
+  <button class="neu" onclick="clearAll()">清零</button>
+  <button class="neu" onclick="setAll()">全1</button>
+  <button class="neu" onclick="copyVal()">复制</button>
+</div>
+
+<hr>
+
+<!-- 读入一个值 -->
+<div class="section-title">读入值 → 设置 bit 格</div>
+<div class="row">
+  <input id="inVal" type="text" placeholder="59d  或  3B  或  0x3B" style="width:200px"
+         onkeydown="if(event.key==='Enter')loadVal()">
+  <button onclick="loadVal()">读入</button>
+</div>
+<div class="hint">支持：十进制加 d（59d）、十六进制（3B 或 0x3B）、二进制加 b（111011b）</div>
+
+<hr>
+
+<!-- 查询字段 -->
+<div class="section-title">查询字段值</div>
+<div class="row">
+  <span class="label">范围</span>
+  <input id="qRange" type="text" placeholder="10:8 或 3" style="width:90px"
+         oninput="queryField()">
+  <span class="out" id="qOut">—</span>
+</div>
+<div class="hint">输入范围后实时显示当前 bit 格中该段的值（同时在 bit 格上高亮）</div>
+
+<hr>
+
+<!-- 设置字段 -->
+<div class="section-title">设置字段（范围 + 值 → 写入 bit 格）</div>
+<div class="row">
+  <span class="label">范围</span>
+  <input id="sRange" type="text" placeholder="12:8" style="width:90px">
+  <span class="label">值</span>
+  <input id="sVal" type="text" placeholder="5'b01100  或  04h  或  4" style="width:180px"
+         onkeydown="if(event.key==='Enter')setField()">
+  <button class="sec" onclick="setField()">写入</button>
+  <span id="sErr" style="color:#f48771;font-size:12px"></span>
+</div>
+<div class="hint">Verilog：5'b01100、6'h04；纯数字默认十六进制（0x1018 或 1018 均可）</div>
+
+<script>
+  var state = new Array(32).fill(0);   // state[i] = bit i
+  var hlRange = null;                  // {hi, lo} for highlight
+
+  // ── 容错预处理：全角转半角，去掉中文字符 ──────
+  function normalize(s) {
+    // 全角 ASCII (！U+FF01 ～ U+FF5E) → 半角
+    s = s.replace(/[！-～]/g, function(c) {
+      return String.fromCharCode(c.charCodeAt(0) - 0xFEE0);
+    });
+    // 中文冒号 / 各种撇号变体 → ASCII
+    s = s.replace(/[：]/g, ':');
+    s = s.replace(/[‘’ʼʹ`´]/g, "'");
+    s = s.replace(/[，。；]/g, '');
+    // 去掉所有剩余非 ASCII 可打印字符
+    s = s.replace(/[^\x20-\x7E]/g, '');
+    return s.trim();
+  }
+
+  // ── 解析输入 ──────────────────────────────
+  function parseInput(raw) {
+    var s = normalize(raw);
+    // Verilog: 5'b01100 / 6'h04 / 11'b0
+    var m = s.match(/^(\d+)'([bhd])([0-9a-fA-F_]+)$/i);
+    if (m) {
+      var base = {b:2, h:16, d:10}[m[2].toLowerCase()];
+      var v = parseInt(m[3].replace(/_/g,''), base);
+      return isNaN(v) ? null : v;
+    }
+    // 末尾 b → 二进制
+    m = s.match(/^([01]+)b$/i);
+    if (m) return parseInt(m[1], 2);
+    // 末尾 h → 十六进制
+    m = s.match(/^([0-9a-fA-F]+)h$/i);
+    if (m) return parseInt(m[1], 16);
+    // 0x 前缀 → 十六进制
+    m = s.match(/^0x([0-9a-fA-F]+)$/i);
+    if (m) return parseInt(m[1], 16);
+    // 含字母 a-f → 十六进制
+    m = s.match(/^([0-9a-fA-F]+)$/i);
+    if (m) return parseInt(m[1], 16);
+    return null;
+  }
+
+  function parseRange(raw) {
+    var s = normalize(raw);
+    if (s.indexOf(':') >= 0) {
+      var p = s.split(':').map(function(x){ return parseInt(x.trim()); });
+      var hi = Math.max(p[0],p[1]), lo = Math.min(p[0],p[1]);
+      return (isNaN(hi)||hi>31||lo<0) ? null : {hi:hi, lo:lo};
+    }
+    var n = parseInt(s);
+    return (isNaN(n)||n>31||n<0) ? null : {hi:n, lo:n};
+  }
+
+  // ── 当前值 ────────────────────────────────
+  function stateVal() {
+    var v = 0;
+    for (var i = 0; i < 32; i++) if (state[i]) v |= (1 << i);
+    return v >>> 0;
+  }
+
+  function pad8(n) { return (n>>>0).toString(16).toUpperCase().padStart(8,'0'); }
+  function padBin(n,w) { return (n>>>0).toString(2).padStart(w,'0'); }
+
+  function extract(val,hi,lo) {
+    var w=hi-lo+1, mask=w>=32?0xFFFFFFFF:((1<<w)-1);
+    return (val>>>lo)&mask;
+  }
+
+  // ── 渲染 ─────────────────────────────────
+  function render() {
+    var val = stateVal();
+    var c = document.getElementById('grid'); c.innerHTML = '';
+    for (var g = 7; g >= 0; g--) {
+      var grp = document.createElement('div'); grp.className = 'grp';
+      for (var b = g*4+3; b >= g*4; b--) {
+        var d = document.createElement('div'); d.className = 'cell';
+        var onOff = state[b] ? 'on' : 'off';
+        var hl = (hlRange && b >= hlRange.lo && b <= hlRange.hi) ? ' hi' : '';
+        d.innerHTML = '<span class="bv '+onOff+hl+'">'+state[b]+'</span>'
+                    + '<span class="bn">'+b+'</span>';
+        (function(bi){ d.onclick = function(){ state[bi] ^= 1; render(); queryField(); }; })(b);
+        grp.appendChild(d);
+      }
+      c.appendChild(grp);
+    }
+    var hexStr = '0x' + pad8(val);
+    document.getElementById('curval').textContent = hexStr;
+    var setBits = [];
+    for (var i = 31; i >= 0; i--) if (state[i]) setBits.push(i);
+    document.getElementById('cursub').textContent = val
+      ? ('= ' + val + 'd    置1：bit ' + setBits.join(', '))
+      : '';
+  }
+
+  // ── 操作 ─────────────────────────────────
+  function clearAll() { state = new Array(32).fill(0); render(); queryField(); }
+  function setAll()   { state = new Array(32).fill(1); render(); queryField(); }
+
+  function loadVal() {
+    var v = parseInput(document.getElementById('inVal').value);
+    if (v === null) return;
+    for (var i = 0; i < 32; i++) state[i] = (v >>> i) & 1;
+    render(); queryField();
+    document.getElementById('qRange').focus();
+  }
+
+  function copyVal() {
+    var txt = document.getElementById('curval').textContent;
+    navigator.clipboard.writeText(txt).catch(function(){});
+  }
+
+  function queryField() {
+    var r = parseRange(document.getElementById('qRange').value);
+    var el = document.getElementById('qOut');
+    if (!r) { hlRange = null; el.textContent = '—'; render(); return; }
+    hlRange = r;
+    var val = stateVal();
+    var fv = extract(val, r.hi, r.lo);
+    var w = r.hi - r.lo + 1;
+    el.innerHTML =
+      "<span style='color:#9cdcfe'>"+w+"'h"+fv.toString(16).toUpperCase()+"</span>  " +
+      "<span style='color:#777'>"+w+"'b"+padBin(fv,w)+"  = "+fv+"d</span>";
+    render();
+  }
+
+  function setField() {
+    var r = parseRange(document.getElementById('sRange').value);
+    var v = parseInput(document.getElementById('sVal').value);
+    var errEl = document.getElementById('sErr');
+    if (!r || v === null) {
+      errEl.textContent = !r ? '范围格式错误' : '值格式错误';
+      return;
+    }
+    errEl.textContent = '';
+    var w = r.hi - r.lo + 1;
+    var mask = w >= 32 ? 0xFFFFFFFF : ((1 << w) - 1);
+    v = v & mask;
+    for (var i = r.lo; i <= r.hi; i++) {
+      state[i] = (v >>> (i - r.lo)) & 1;
+    }
+    hlRange = r;
+    render(); queryField();
+  }
+
+  render();
+</script>
+</body>
+</html>
